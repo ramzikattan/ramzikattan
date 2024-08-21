@@ -1,1 +1,1 @@
-
+Project Description: I worked as an Undergraduate Research Assistant in the High Impact Laboratory as part of the Rolls Royce Erosion project where I contributed greatly to their data analysis efforts. One of my projects was to convert massive amonut of raw voltage data into force values and plots. Here is the MATLAB scripts I developed that automated this previously manual process and shortened processing times from weeks to hours. 
