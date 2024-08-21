@@ -1,4 +1,5 @@
 Project Description: 
+  
   Our team ran an in-depth analysis on a dataset that chronicled articles published by Mashable over a period of two years. This dataset utilized over fifty different features to predict the number of times each article would get shared via social networks as an indicator of popularity and word-of-mouth buzz. Our question was this: what aspects of an article or blog piece, both within and surrounding its release, are the most important in determining its popularity? With an answer to this question, we could potentially help small businesses that are having difficulties reaching larger audiences selectively craft eye-catching articles that will increase attraction and attention to their services, getting people talking about what they have to offer. Small businesses offer so much to their communities, but it can be hard for them to get off the ground. Depending on our findings, we could help such ventures get more people invested and involved.
 
 Machine Learning Models Deployed: 
@@ -17,12 +18,12 @@ Project Contributors:
   Carissa Ing
 
 Tech Stack: 
-  Pandas - Data Wrangling, Cleaning, and Exploratory Data Analysis
-  Seaborn - Visualizations
-  Ski-Kit Learn - Data Prepping, Machine Learning Model Training, and Machine Learning Model Testing
-  PyTorch - Neural Network Data Prepping, Neural Network Training, and Neural Network Testing
-  Numpy - Array Operations
-  Patsy - Design Matrices 
+  1. Pandas - Data Wrangling, Cleaning, and Exploratory Data Analysis
+  2. Ski-Kit Learn - Data Prepping, Machine Learning Model Training, and Machine Learning Model Testing
+  3. PyTorch - Neural Network Data Prepping, Neural Network Training, and Neural Network Testing
+  4. Seaborn - Visualizations
+  5. Numpy - Array Operations
+  6. Patsy - Design Matrices 
 
 
   
