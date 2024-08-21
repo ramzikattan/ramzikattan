@@ -1,5 +1,5 @@
 Project Description:
-  This folder contains the project-like homework submission for STA380 P2 "Introducting to Machine Learning" taught by Professor James Scott. All problems and solutions are available in the Homework.ipynb file. 
+  This folder contains the project-like homework submission for STA380 P2 "Introduction to Machine Learning" taught by Professor James Scott. All problems and solutions are available in the Homework.ipynb file. 
 
 
 Contributors:
