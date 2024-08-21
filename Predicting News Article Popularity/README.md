@@ -12,10 +12,15 @@ Machine Learning Models Deployed:
   7. Naive Bayes - A strong classifier model that uses Bayes' theorem with a strong (naive) independence assumption. Stratified K fold was used to ensure each fold accurately represented the characteristics of the whole data set, with the goal of increased accuracy. 
 
 Project Contributors: 
-  Siboney Cardoso
-  Adithya Murali
-  Andrew White
-  Carissa Ing
+  Siboney Cardoso - EDA and Tree Regessors
+  
+  Adithya Murali - KNN
+  
+  Andrew White - Naive Bayes
+  
+  Carissa Ing - Linear Regessors 
+
+  Ramzi Kattan - EDA and Neural Network Regessor
 
 Tech Stack: 
   1. Pandas - Data Wrangling, Cleaning, and Exploratory Data Analysis
