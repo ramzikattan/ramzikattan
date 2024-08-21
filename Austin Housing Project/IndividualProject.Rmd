@@ -1,0 +1,433 @@
+---
+title: "IndividualProject"
+output: pdf_document
+date: "2024-08-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set-Up & Data Loading
+```{r Set-Up & Data Loading}
+library(caret)
+library(rpart.plot)
+library(glmnet)
+library(gbm)
+library(BART)
+library(dplyr)
+library(stringr)
+library(tree)
+library(bartMachine)
+library(rJava)
+
+rm(list = ls())
+set.seed(20)
+
+AustinHouses <- read.csv("Austinhouses.csv")
+AustinHouses <- AustinHouses[, -c(1, 3)] # Removing 'hometype', 'latest_saledate', 'latest_salemonth', 'latest_saleyear'
+  
+AustinHoldout <- read.csv("Austinholdout.csv")
+AustinHoldout <- AustinHoldout[, -c(1, 3)] # Removing 'street address' and 'description'
+```
+
+# Exploratory Data Analysis
+```{r EDA}
+summary(AustinHouses)
+
+par(mfcol = c(2,3))
+plot(AustinHouses$zipcode, AustinHouses$latestPrice)
+plot(AustinHouses$latitude, AustinHouses$latestPrice)
+plot(AustinHouses$longitude, AustinHouses$latestPrice)
+plot(AustinHouses$garageSpace, AustinHouses$latestPrice)
+plot(AustinHouses$hasAssociation, AustinHouses$latestPrice)
+plot(AustinHouses$hasGarage, AustinHouses$latestPrice)
+
+plot(AustinHouses$hasSpa, AustinHouses$latestPrice)
+plot(AustinHouses$hasView, AustinHouses$latestPrice)
+plot(AustinHouses$yearBuilt, AustinHouses$latestPrice)
+plot(AustinHouses$latest_salemonth, AustinHouses$latestPrice)
+plot(AustinHouses$latest_saleyear, AustinHouses$latestPrice)
+plot(AustinHouses$numOfPhotos, AustinHouses$latestPrice)
+
+plot(AustinHouses$numOfAccessibilityFeatures, AustinHouses$latestPrice)
+plot(AustinHouses$numOfAppliances, AustinHouses$latestPrice)
+plot(AustinHouses$numOfParkingFeatures, AustinHouses$latestPrice)
+plot(AustinHouses$numOfPatioAndPorchFeatures, AustinHouses$latestPrice)
+plot(AustinHouses$numOfSecurityFeatures, AustinHouses$latestPrice)
+plot(AustinHouses$numOfWaterfrontFeatures, AustinHouses$latestPrice)
+
+plot(AustinHouses$numOfWindowFeatures, AustinHouses$latestPrice)
+plot(AustinHouses$numOfCommunityFeatures, AustinHouses$latestPrice)
+plot(AustinHouses$lotSizeSqFt, AustinHouses$latestPrice)
+plot(AustinHouses$livingAreaSqFt, AustinHouses$latestPrice)
+plot(AustinHouses$avgSchoolDistance, AustinHouses$latestPrice)
+plot(AustinHouses$avgSchoolRating, AustinHouses$latestPrice)
+
+plot(AustinHouses$avgSchoolSize, AustinHouses$latestPrice)
+plot(AustinHouses$MedianStudentsPerTeacher, AustinHouses$latestPrice)
+plot(AustinHouses$numOfBathrooms, AustinHouses$latestPrice)
+plot(AustinHouses$numOfBedrooms, AustinHouses$latestPrice)
+plot(AustinHouses$numOfStories, AustinHouses$latestPrice)
+```
+
+``` {r Feature Engineering}
+AustinHouses <- AustinHouses[, -c(4, 5, 9, 12, 13, 14, 15)]
+
+nullcounts <- sum(colSums(is.na(AustinHouses)))
+print(paste("There are", {nullcounts}, "nulls in the data sets."))
+print("From the plots, there are a number of variables that you would expect to increase / decrease the value of a home, but do not. Some examples include hasAssociation, hasSpa, and hasView.  The variable 'hometype' only includes Single Family homes, therefore it's not appropriate to use as a predictor in a categorical sense since it only has one level. Latest_saledate, latest_salemonth, and latest_saleyear all have the same information, and I do not find them to be as relevant or effective on the prediction of the house, therefore I elected to remove them. I also removed the hasAssociation since I'll account for areas and I'll remove garageSpace because I've already accounted for having a garage with the hasGarage and the number of parking features. I removed numOfPhotos because I find it irrelevant to house price.")
+print("Removed Variables: Street Address, Description, garageSpaces, hasAssociation, homeType, latest_saledate, latest_saleyear, latest_salemonth, numOfPhotos")
+
+get_areas <- function(series) {
+  areas <- list()
+  for (zip in series) {
+    if (zip == 78701) {
+      areas <- append(areas, "Downtown")
+    } else if (zip == 78704) {
+      areas <- append(areas, "South Central")
+    } else if (zip %in% c(78703, 78705, 78751, 78756, 78757)) {
+      areas <- append(areas, "Central Austin")
+    } else if (zip %in% c(78702, 78722)) {
+      areas <- append(areas, "East Austin")
+    } else if (zip %in% c(78741, 78744, 78747)) {
+      areas <- append(areas, "Southeast")
+    } else if (zip %in% c(78745, 78748)) {
+      areas <- append(areas, "South Austin") 
+    } else if (zip %in% c(78735, 78736, 78738, 78739)) {
+      areas <- append(areas, "Southwest Austin")
+    } else if (zip %in% c(78733, 78746)) {
+      areas <- append(areas, "Westlake Hills")
+    } else if (zip %in% c(78731, 78727, 78750, 78759)) {
+      areas <- append(areas, "Northwest Austin")
+    } else if (zip %in% c(78721, 78723, 78724)) {
+      areas <- append(areas, "Northeast Austin")
+    } else {
+      areas <- append(areas, "Other")
+    }
+  }
+  return(areas)
+}
+
+AustinHouses$age <- 2024 - AustinHouses$yearBuilt
+
+AustinHouses$Areas <- get_areas(AustinHouses$zipcode)
+AustinHouses <- AustinHouses[, -7]
+print("Removed Variables: yearBuilt")
+
+
+household_income <- read.csv("Income Past 12 Months 2022.csv")
+zip_codes <- household_income %>% 
+  select(contains("ZCTA5"))
+zip_codes.income <- zip_codes[15,]
+colnames(zip_codes.income) <- gsub("ZCTA5\\.", "", colnames(zip_codes.income))
+zip_codes.income <- t(zip_codes.income)
+zip_code_df <- data.frame(zipcode = rownames(zip_codes.income), MedIncome = as.vector(zip_codes.income))
+AustinHouses <- merge(AustinHouses, zip_code_df, by = "zipcode")
+AustinHouses <- AustinHouses %>%
+  mutate(MedIncome = as.character(MedIncome)) %>%
+  mutate(MedIncome = str_replace_all(MedIncome, "[^0-9.]", "")) %>%
+  mutate(MedIncome = as.numeric(MedIncome))
+print("I found Austin household income data from The United States Census Bureau and used it to parse through the zipcodes and extract household income. I then merged this with the dataset to add a MedIncome variable that can hopefully be used to strengthen my models.")
+plot(AustinHouses$MedIncome, AustinHouses$latestPrice)
+cor(AustinHouses$MedIncome, AustinHouses$latestPrice)
+print("We can see a slight positive correlation between household income and house value.")
+AustinHouses <- AustinHouses[, -1]
+print("Removed Variables: Zipcode because location of house accounted for in Areas")
+
+AustinHouses$Areas <- as.character(unlist(AustinHouses$Areas))
+AustinHouses$hasGarage <- as.factor(AustinHouses$hasGarage)
+AustinHouses$hasSpa <- as.factor(AustinHouses$hasSpa)
+AustinHouses$hasView <- as.factor(AustinHouses$hasView)
+AustinHouses$numOfAccessibilityFeatures <- as.character(AustinHouses$numOfAccessibilityFeatures)
+AustinHouses$numOf <- AustinHouses$numOfAppliances+AustinHouses$numOfPatioAndPorchFeatures+AustinHouses$numOfSecurityFeatures+AustinHouses$numOfWaterfrontFeatures+AustinHouses$numOfWindowFeatures+AustinHouses$numOfCommunityFeatures+AustinHouses$numOfParkingFeatures
+AustinHousesClean <- AustinHouses[,-c(8, 9, 10, 11, 12, 13, 14)]
+plot(AustinHouses$numOf, AustinHouses$latestPrice)
+plot(AustinHouses$age, AustinHouses$latestPrice)
+print("I decided to turn variables that didn't seem to have a numerical significance into categorical variables.")
+
+AustinHousesClean <- AustinHousesClean %>%
+  mutate_if(is.character, as.factor)
+
+dummies <- dummyVars(" ~ .", data = AustinHousesClean)
+AustinHouses_encoded <- data.frame(predict(dummies, newdata = AustinHousesClean))
+
+```
+
+```{r Splitting Data and Initializing Control}
+# Separating 20% of the data for final validation
+AustinHouses_encoded$logPrice <- log(AustinHouses_encoded$latestPrice)
+latestPrice <- AustinHouses_encoded$latestPrice
+AustinHouses_encoded <- AustinHouses_encoded %>% select(-latestPrice)
+print('Using log(Price) to help stabilize variance and normally distribute the data.')
+
+train_indices = createDataPartition(AustinHouses_encoded$logPrice, p = 0.8)
+
+train_data = AustinHouses_encoded[train_indices$Resample1,] # Training Set
+test_data = AustinHouses_encoded[-train_indices$Resample1,] # Test Set
+testPrice <- latestPrice[-train_indices$Resample1]
+
+fit_control <- trainControl(
+  method = "cv",
+  number = 10,
+  selectionFunction="best")
+```
+
+
+```{r Simple Regression Tree}
+regression_tree = tree(logPrice ~., 
+                       data = train_data)
+
+plot(regression_tree)
+text(regression_tree, pretty = 0)
+
+predictions_regtree <- predict(regression_tree, newdata = test_data)
+MSE <- mean((testPrice - exp(predictions_regtree))^2)
+print(MSE)
+print("This tree model is worse, but that could be due to the complexity of the data set after one-hot encoding. Let's try pruning the tree and checking a more advanced model.")
+```
+
+```{r Cross Validated Regression Tree}
+cp_grid <- expand.grid(cp = seq(0.0001, 0.1, by = 0.0005))
+cvtree <- train(logPrice ~., 
+                data = train_data, 
+                method = 'rpart', 
+                trControl = fit_control,
+                tuneGrid = cp_grid)
+
+predictions_cvtree <- predict(cvtree, newdata = test_data)
+MSE <- mean((testPrice - exp(predictions_cvtree))^2)
+print(MSE)
+print("This model is significantly better. Let's try bagging.")
+```
+
+```{r Bagging}
+tune_grid = expand.grid(mtry = c(length(train_data)-1)) # Bagging with mtry = p
+
+bagging_tree <- train(logPrice ~.,
+                 data = train_data,
+                 method = 'rf', # using a random forest for m = p 
+                 trControl = fit_control,
+                 tuneGrid = tune_grid, 
+                 ntree = 600, 
+                 Importance = TRUE
+                 )
+
+predictions_baggingtree <- predict(bagging_tree, newdata = test_data)
+MSE <- mean((testPrice - exp(predictions_baggingtree))^2)
+print(MSE)
+
+varImp(bagging_tree, scale = TRUE)
+print("Bagging has produced the best results so far. We may be able capture better interactions with the response variable by randomly selecting few variables to build trees out of. Let's try random forest.")
+```
+
+```{r Random Forest}
+tune_grid = expand.grid(mtry = c(3, 6, 9, 11, 14))
+
+rf_tree <- train(logPrice ~.,
+                 data = train_data,
+                 method = 'rf',
+                 trControl = fit_control,
+                 tuneGrid = tune_grid,
+                 ntree = 500,
+                 Importance = TRUE
+                 )
+plot(rf_tree)
+predictions_rftree <- predict(rf_tree, newdata = test_data)
+MSE <- mean((testPrice - exp(predictions_rftree))^2)
+print(MSE)
+
+varImp(rf_tree, scale = TRUE)
+
+print("Using a grid search for random forest over a number of variables results in a variance of OOS MSE, most of which are worse than for bagging. This is likely due to an inconsistent pulling of random variables. Next I will try BART")
+```
+```{r BART}
+xtrain <- train_data[, -length(train_data)]
+xtest <- test_data[, -length(train_data)]
+
+ytrain <- train_data[, length(train_data)]
+ytest <- test_data[, length(train_data)]
+
+bartfit <- gbart(xtrain, ytrain, x.test = xtest)
+yhat.bart <- bartfit$yhat.test.mean
+MSE <- mean((exp(yhat.bart) - exp(ytest))^2)
+print(MSE)
+
+print("This is the end of the reproduction of problem 4. We can see that all the models performed similarly to the simpler dataset. I found that my random forest and BART models did not perform well at all, which was peculiar. Now I will try boosting, subset selection, and PCA models.")
+```
+
+```{r Boosting}
+gbm_grid <-  expand.grid(interaction.depth = c(10, 11, 15, 16, 17, 18, 20), 
+                        n.trees = c(100, 300, 500), 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 5)
+gbmfit <- train(logPrice ~.,
+                   data = train_data,
+                   method = "gbm", 
+                   trControl = fit_control,
+                   tuneGrid = gbm_grid,
+                   verbose = FALSE)
+
+ypredict <- predict(gbmfit, newdata = test_data)
+MSE <- mean((testPrice - exp(ypredict))^2)
+print(MSE)
+plot(gbmfit)
+
+```
+
+```{r Linear Regression with Subset Selection}
+x.train <- model.matrix(logPrice ~., train_data)[, -length(train_data)]
+x.test <- model.matrix(logPrice ~., test_data)[, -length(test_data)]
+
+
+y.train <- as.numeric(unlist(train_data[length(train_data)]))
+y.test <- as.numeric(unlist(test_data[length(test_data)]))
+
+# Fit the initial null model
+null_model <- lm(logPrice ~ 1, data = train_data)
+
+# Fit the full model
+full_model <- lm(logPrice ~ ., data = train_data)
+
+# Perform forward selection
+forward_model <- step(null_model, 
+                      scope = list(lower = null_model, upper = full_model), 
+                      direction = "forward")
+
+backward_model <- step(full_model, 
+                       direction = "backward",
+                       scope = ~.)
+
+both_model <- step(full_model, 
+                       direction = "both",
+                       scope = ~.)
+
+interaction_model <- step(full_model, 
+                       direction = "both",
+                       scope = ~.^2)
+
+
+yhat.forward <- predict(forward_model, newdata = test_data)
+MSE <- mean((exp(yhat.forward) - exp(y.test))^2)
+print(MSE)
+
+yhat.stepwise <- predict(backward_model, newdata = test_data)
+MSE <- mean((exp(yhat.stepwise) - exp(y.test))^2)
+print(MSE)
+
+yhat.stepwise <- predict(both_model, newdata = test_data)
+MSE <- mean((exp(yhat.stepwise) - exp(y.test))^2)
+print(MSE)
+
+yhat.interactions <- predict(interaction_model, newdata = test_data)
+MSE <- mean((exp(yhat.interactions) - exp(y.test))^2)
+print(MSE)
+```
+_
+```{r Ridge Regression}
+lambdagrid <- 10^seq(10, -2, length = 100)
+ridge.model <- cv.glmnet(x.train, y.train, alpha = 0, lambda = lambdagrid)
+bestlambdaR <- ridge.model$lambda.min
+yhat.ridge <- predict(ridge.model, s = bestlambdaR, newx = x.test)
+MSE <- mean((exp(yhat.ridge) - exp(y.test))^2)
+print(MSE)
+
+```
+
+```{r Lasso Regression}
+lambdagrid <- 10^seq(10, -2, length = 100)
+lasso.model <- cv.glmnet(x.train, y.train, alpha = 1, lambda = lambdagrid)
+bestlambdaL <- lasso.model$lambda.min
+yhat.lasso <- predict(lasso.model, s = bestlambdaL, newx = x.test)
+MSE <- mean((exp(yhat.lasso) - exp(y.test))^2)
+print(MSE)
+```
+
+```{r PCR}
+pcrfit <- train(logPrice ~ ., data = train_data, 
+                 method = "pcr", 
+                 trControl = fit_control,
+                 tuneGrid = data.frame(ncomp=1:33),
+                 verbose = FALSE)
+yhat.pcr <- predict(pcrfit, newdata = test_data)
+MSE <- mean((exp(yhat.pcr) - exp(y.test))^2)
+print(MSE)
+```
+
+
+```{r Ensembling}
+# Average predictions
+yhat.ensemble <- (exp(yhat.forward) + exp(yhat.ridge) + exp(yhat.pcr) + exp(yhat.lasso) + exp(ypredict) + exp(predictions_baggingtree) + exp(predictions_rftree)) / 7
+
+# Calculate MSE
+MSE_ensemble <- mean((yhat.ensemble - exp(y.test))^2)
+print(MSE_ensemble)
+```
+
+```{r Holdout Predictions}
+AustinHoldout <- AustinHoldout[, -c(4, 5, 9, 12, 13, 14, 15)] 
+
+AustinHoldout$age <- 2024 - AustinHoldout$yearBuilt
+
+AustinHoldout$Areas <- get_areas(AustinHoldout$zipcode)
+AustinHoldout <- AustinHoldout[, -7]
+
+
+household_income <- read.csv("Income Past 12 Months 2022.csv")
+zip_codes <- household_income %>% 
+  select(contains("ZCTA5"))
+zip_codes.income <- zip_codes[15,]
+colnames(zip_codes.income) <- gsub("ZCTA5\\.", "", colnames(zip_codes.income))
+zip_codes.income <- t(zip_codes.income)
+zip_code_df <- data.frame(zipcode = rownames(zip_codes.income), MedIncome = as.vector(zip_codes.income))
+AustinHoldout <- merge(AustinHoldout, zip_code_df, by = "zipcode")
+AustinHoldout <- AustinHoldout %>%
+  mutate(MedIncome = as.character(MedIncome)) %>%
+  mutate(MedIncome = str_replace_all(MedIncome, "[^0-9.]", "")) %>%
+  mutate(MedIncome = as.numeric(MedIncome))
+AustinHoldout <- AustinHoldout[, -1]
+
+AustinHoldout$Areas <- as.character(unlist(AustinHoldout$Areas))
+AustinHoldout$hasGarage <- as.factor(AustinHoldout$hasGarage)
+AustinHoldout$hasSpa <- as.factor(AustinHoldout$hasSpa)
+AustinHoldout$hasView <- as.factor(AustinHoldout$hasView)
+AustinHoldout$numOfAccessibilityFeatures <- as.character(AustinHoldout$numOfAccessibilityFeatures)
+AustinHoldout$numOf <- AustinHoldout$numOfAppliances+AustinHoldout$numOfPatioAndPorchFeatures+AustinHoldout$numOfSecurityFeatures+AustinHoldout$numOfWaterfrontFeatures+AustinHoldout$numOfWindowFeatures+AustinHoldout$numOfCommunityFeatures+AustinHoldout$numOfParkingFeatures
+AustinHoldoutClean <- AustinHoldout[,-c(6, 8, 9, 10, 11, 12, 13, 14)]
+
+AustinHoldoutClean <- AustinHoldoutClean %>%
+  mutate_if(is.character, as.factor)
+
+dummies <- dummyVars(" ~ .", data = AustinHoldoutClean)
+AustinHoldout_encoded <- data.frame(predict(dummies, newdata = AustinHoldoutClean))
+
+fit_control <- trainControl(
+  method = "cv",
+  number = 10,
+  selectionFunction="best")
+
+predictions_cvtree <- predict(cvtree, newdata = AustinHoldout_encoded)
+
+predictions_baggingtree <- predict(bagging_tree, newdata = AustinHoldout_encoded)
+
+yhat.pcr <- predict(pcrfit, newdata = AustinHoldout_encoded)
+
+ypredict <- predict(gbmfit, newdata = AustinHoldout_encoded)
+
+predictions_rftree <- predict(rf_tree, newdata = AustinHoldout_encoded)
+
+ yhat.ensemble <- (exp(yhat.pcr) + exp(ypredict) + exp(predictions_baggingtree) + exp(predictions_rftree) + exp(predictions_cvtree)) / 5
+
+AustinHoldout$latestPrice <- yhat.ensemble
+filepath <- "/Users/ramzikattan/Library/CloudStorage/OneDrive-TheUniversityofTexasatAustin/2. Summer/STA S380/Individual Project/austinholdout.csv" 
+write.csv(AustinHoldout, file = filepath, row.names = FALSE)
+ 
+```
+
+
+
+
+
+
+
+
