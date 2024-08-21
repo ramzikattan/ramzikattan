@@ -1,0 +1,1076 @@
+---
+title: "StudentGPAProject - Adithya Murali, Eshaan Arora, Timmy Ren, & Ramzi Kattan"
+output: pdf_document
+date: "2024-07-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r Libraries & Seed}
+library(caret)
+library(tidyverse)
+library(BART)
+library(GGally)
+library(rpart.plot)
+library(rpart)
+library(pROC)
+
+set.seed(20)
+rm(list = ls()) # Clean the workspace on every run
+```
+
+``` {r Data Import}
+
+################################################################
+# Import the data
+################################################################
+set.seed(20)
+StudentDataTotal <- read.csv("/Users/ramzikattan/Library/CloudStorage/OneDrive-TheUniversityofTexasatAustin/2. Summer/STA S380/StudentGPAProject/gpa_df.csv")
+
+StudentData <- StudentDataTotal[, !names(StudentDataTotal) %in% c("X", "StudentID", "GradeClass", "newGradeClass", "pass_fail")]
+
+StudentData_PF <- StudentDataTotal[, !names(StudentDataTotal) %in% c("X", "StudentID", "GradeClass", "newGradeClass", "GPA")]
+StudentData_PF$pass_fail <- factor(StudentData_PF$pass_fail, levels = c("0", "1"), labels = c("Fail", "Pass"))
+```
+
+``` {r Data Splitting}
+set.seed(20)
+################################################################
+# Hold out 20% of the data for GPA [Regression]
+################################################################
+train_idx = createDataPartition(StudentData$GPA,
+                               p = 0.8, 
+                               list = FALSE)
+
+GPA_train = StudentData[train_idx,]
+GPA_test  = StudentData[-train_idx,]
+
+################################################################
+# Hold out 20% of the data for P/F [Classification]
+################################################################
+train_idxPF = createDataPartition(StudentData_PF$pass_fail,
+                               p = 0.8, 
+                               list = FALSE)
+
+PF_train = StudentData_PF[train_idxPF,]
+PF_test  = StudentData_PF[-train_idxPF,]
+```
+
+``` {r Cross Validation Set Up}
+set.seed(20)
+################################################################
+# Set Up Cross Validation for GPA [Regression]
+################################################################
+cv_foldsGPA = createFolds(GPA_train, k = 10)
+
+fit_controlGPA <- trainControl(
+  method = "cv",
+  number = 10,
+  selectionFunction="oneSE")
+
+################################################################
+# Set Up Cross Validation for P/F [Classification]
+################################################################
+cv_foldsPF = createFolds(PF_train, k = 10)
+
+my_summary = function(data, lev = NULL, model = NULL) {
+  default = defaultSummary(data, lev, model)
+  twoclass = twoClassSummary(data, lev, model)
+  # Converting to TPR and FPR instead of sens/spec
+  twoclass[3] = 1-twoclass[3]
+  names(twoclass) = c("AUC_ROC", "TPR", "FPR")
+  logloss = mnLogLoss(data, lev, model)
+  c(default,twoclass, logloss)
+}
+
+fit_controlPF <- trainControl(
+  method = "cv",
+  number = 10,
+  # Save predicted probabilities, not just classifications
+  classProbs = TRUE,
+  # Save all the holdout predictions, to summarize and plot
+  savePredictions = TRUE,
+  summaryFunction = my_summary,
+  selectionFunction="oneSE")
+
+```
+
+``` {r Decision Tree Classifer}
+set.seed(20)
+################################################################
+# Decision Tree Classifier [Regression]
+################################################################
+tune_grid <- expand.grid(cp = seq(0, 1, by = 0.001))
+
+tree <- train(GPA ~., 
+              data = GPA_train,
+              method = "rpart",
+              tuneGrid = tune_grid,
+              trControl = fit_controlGPA
+              )
+
+rpart.plot(tree$finalModel)
+
+predictions_cvtree <- predict(tree, newdata = GPA_test)
+MSE <- mean((GPA_test$GPA - (predictions_cvtree))^2)
+MSE
+
+plot(GPA_test$GPA, predictions_cvtree, main = "Test GPA vs Predicted GPA", xlab = "Test GPA", ylab = "Predicted GPA")
+abline(0,1,col=2)
+```
+
+``` {r Decision Tree Classifier}
+################################################################
+# Decision Tree Classifier [Classifier]
+################################################################
+treePF <- train(pass_fail ~., 
+              data = PF_train,
+              method = "rpart",
+              tuneGrid = tune_grid,
+              trControl = fit_controlPF,
+              )
+
+rpart.plot(treePF$finalModel)
+
+
+plot(treePF)
+
+predictions_cvtreePF <- predict(treePF, newdata = PF_test)
+predicted_probs <- predict(treePF, newdata = PF_test, type = "prob")
+
+treePF_res = thresholder(treePF, threshold = seq(0, 1, by = 0.01), final = TRUE)
+
+treePF_res <- treePF_res %>%
+mutate(TPR = Sensitivity, FPR = 1 - Specificity, FNR = 1 - Sensitivity)
+
+optim_J = treePF_res[which.max(treePF_res$J), ]
+
+ggplot(aes(x = 1 - Specificity, y = Sensitivity), data = treePF_res) +
+geom_line() +
+ggtitle("Decision Tree Classifier ROC Curve") +
+ylab("TPR (Sensitivity)") +
+xlab("FPR (1-Specificity)") +
+geom_abline(intercept = 0, slope = 1, linetype = 'dotted') +
+geom_segment(aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkred', data = optim_J) +
+xlim(0, 1) + 
+theme_bw()
+
+gbm_oos_tree = caret::lift(PF_test$pass_fail~predicted_probs[,1])
+
+ggplot(gbm_oos_tree) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+
+tree_results <- data.frame(obs = PF_test$pass_fail, 
+                              Fail = predicted_probs[, "Fail"],
+                              Pass = predicted_probs[, "Pass"])
+
+sorted_tree <- tree_results %>%
+  arrange(desc(Fail))
+
+pos_thresh <- 0.95
+cumulative_pos_cases <- cumsum(sorted_tree$obs == "Fail")
+total_positive_cases <- sum(sorted_tree$obs == "Fail")
+samples_needed <- which(cumulative_pos_cases >= total_positive_cases * pos_thresh)[1]
+print(paste("Number of samples needed to reach", pos_thresh * 100, "% of positive cases:", samples_needed))
+
+
+```
+
+
+``` {r Boosting Regression}
+set.seed(20)
+################################################################
+# Boosting [Regression]
+################################################################
+gbm_grid <-  expand.grid(interaction.depth = c(1, 2, 3), 
+                        n.trees = c(100, 200, 300, 400, 500, 700, 900, 1000, 1100, 1200, 1300, 1400, 1500), 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 5)
+
+GPAgbmfit <- train(GPA ~.,
+                   data = GPA_train,
+                   method = "gbm", 
+                   trControl = fit_controlGPA,
+                   tuneGrid = gbm_grid,
+                   verbose = FALSE)
+df <- GPAgbmfit$results
+df$n.trees <- as.numeric(as.character(df$n.trees))
+
+ypredictGPA <- predict(GPAgbmfit, newdata = GPA_test)
+mean((ypredictGPA - GPA_test$GPA)^2)
+
+best_ix = which.min(GPAgbmfit$results$RMSE)
+best = GPAgbmfit$results[best_ix,]
+onese_max_RMSE = best$RMSE + best$RMSESD/sqrt(10)
+
+
+ggplot(aes(x = n.trees, y=RMSE, color = as.factor(interaction.depth), group = interaction.depth), 
+       data = df) + 
+  geom_segment(aes(x=n.trees,
+                   xend = n.trees, 
+                   y = RMSE - RMSESD/sqrt(10),
+                   yend = RMSE+RMSESD/sqrt(10))) +
+  geom_hline(yintercept = onese_max_RMSE, linetype = 'dotted') +
+  geom_point()+
+  geom_line() + 
+  xlab("Number of Trees") + 
+  ylab("RMSE")+
+  scale_color_discrete(name = "Max Tree Depth")
+
+plot(GPA_test$GPA, ypredictGPA, main = "Test GPA vs Predicted GPA", xlab = "Test GPA", ylab = "Predicted GPA")
+abline(0,1,col=2)
+
+
+```
+
+``` {r Boosting Classification}
+################################################################
+# Boosting [Classification]
+################################################################
+PFgbmfit <- train(pass_fail ~.,
+                   data = PF_train,
+                   method = "gbm", 
+                   trControl = fit_controlPF,
+                   tuneGrid = gbm_grid,
+                   metric = "logLoss")
+ypredict <- predict(PFgbmfit, newdata = PF_test)
+
+predicted_probs_gbm <- predict(PFgbmfit, newdata = PF_test, type = "prob")
+
+gbmPF_res = thresholder(PFgbmfit, threshold = seq(0, 1, by = 0.01), final = TRUE)
+
+gbmPF_res <- gbmPF_res %>%
+mutate(TPR = Sensitivity, FPR = 1 - Specificity, FNR = 1 - Sensitivity)
+
+optim_Jgbm = gbmPF_res[which.max(gbmPF_res$J), ]
+
+ggplot(aes(x = 1 - Specificity, y = Sensitivity), data = gbmPF_res) +
+geom_line() +
+ggtitle("GBM ROC Curve") +
+ylab("TPR (Sensitivity)") +
+xlab("FPR (1-Specificity)") +
+geom_abline(intercept = 0, slope = 1, linetype = 'dotted') +
+geom_segment(aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkred', data = optim_Jgbm) +
+xlim(0, 1) +
+theme_bw()
+
+gbm_oos_lift = caret::lift(PF_test$pass_fail~predicted_probs_gbm[,1])
+
+ggplot(gbm_oos_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+
+gbm_results <- data.frame(obs = PF_test$pass_fail, 
+                              Fail = predicted_probs_gbm[, "Fail"],
+                              Pass = predicted_probs_gbm[, "Pass"])
+
+sorted_gbm <- gbm_results %>%
+  arrange(desc(Fail))
+
+pos_thresh <- 0.95
+cumulative_pos_cases <- cumsum(sorted_gbm$obs == "Fail")
+total_positive_cases <- sum(sorted_gbm$obs == "Fail")
+samples_needed <- which(cumulative_pos_cases >= total_positive_cases * pos_thresh)[1]
+print(paste("Number of samples needed to reach", pos_thresh * 100, "% of positive cases:", samples_needed))
+
+```
+
+``` {r Random Forest Classification}
+set.seed(20)
+################################################################
+# Random Forest [Classification]
+################################################################
+rf_grid <-  expand.grid(mtry = c(2, 3, 4, 7, 12, 15))
+
+PFrffit <- train(pass_fail ~.,
+                 data = PF_train,
+                 method = "rf", 
+                 trControl = fit_controlPF,
+                 metric = "logLoss",
+                 tuneGrid = rf_grid)
+
+ypredictrf <- predict(PFrffit, newdata = PF_test)
+
+predicted_probs_rf <- predict(PFrffit, newdata = PF_test, type = "prob")
+
+rfPF_res = thresholder(PFrffit, threshold = seq(0, 1, by = 0.01), final = TRUE)
+
+rfPF_res <- rfPF_res %>%
+mutate(TPR = Sensitivity, FPR = 1 - Specificity, FNR = 1 - Sensitivity)
+
+optim_Jrf = rfPF_res[which.max(rfPF_res$J), ]
+
+ggplot(aes(x = 1 - Specificity, y = Sensitivity), data = rfPF_res) +
+geom_line() +
+ggtitle("Random Forest ROC Curve") +
+ylab("TPR (Sensitivity)") +
+xlab("FPR (1-Specificity)") +
+geom_abline(intercept = 0, slope = 1, linetype = 'dotted') +
+geom_segment(aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkred', data = optim_Jrf) +
+xlim(0, 1) +
+theme_bw()
+
+rf_oos_lift = caret::lift(PF_test$pass_fail~predicted_probs_rf[,1])
+
+ggplot(rf_oos_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+
+rf_results <- data.frame(obs = PF_test$pass_fail, 
+                              Fail = predicted_probs_rf[, "Fail"],
+                              Pass = predicted_probs_rf[, "Pass"])
+
+sorted_rf <- rf_results %>%
+  arrange(desc(Fail))
+
+pos_thresh <- 0.95
+cumulative_pos_cases <- cumsum(sorted_rf$obs == "Fail")
+total_positive_cases <- sum(sorted_rf$obs == "Fail")
+samples_needed <- which(cumulative_pos_cases >= total_positive_cases * pos_thresh)[1]
+print(paste("Number of samples needed to reach", pos_thresh * 100, "% of positive cases:", samples_needed))
+```
+
+```{r Bagging Classification}
+set.seed(20)
+################################################################
+# Bagging [Classification]
+################################################################
+boost_grid <-  expand.grid(mtry = 12)
+
+PFboostfit <- train(pass_fail ~.,
+                 data = PF_train,
+                 method = "rf", 
+                 trControl = fit_controlPF,
+                 metric = "logLoss",
+                 tuneGrid = boost_grid)
+
+ypredictboost <- predict(PFboostfit, newdata = PF_test)
+
+predicted_probs_boost <- predict(PFboostfit, newdata = PF_test, type = "prob")
+
+boostPF_res = thresholder(PFboostfit, threshold = seq(0, 1, by = 0.01), final = TRUE)
+
+boostPF_res <- boostPF_res %>%
+mutate(TPR = Sensitivity, FPR = 1 - Specificity, FNR = 1 - Sensitivity)
+
+optim_Jboost = boostPF_res[which.max(boostPF_res$J), ]
+
+ggplot(aes(x = 1 - Specificity, y = Sensitivity), data = boostPF_res) +
+geom_line() +
+ggtitle("Boosting ROC Curve") +
+ylab("TPR (Sensitivity)") +
+xlab("FPR (1-Specificity)") +
+geom_abline(intercept = 0, slope = 1, linetype = 'dotted') +
+geom_segment(aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkred', data = optim_Jboost) +
+xlim(0, 1) +
+theme_bw()
+
+boost_oos_lift = caret::lift(PF_test$pass_fail~predicted_probs_boost[,1])
+
+ggplot(boost_oos_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+
+bagging_results <- data.frame(obs = PF_test$pass_fail, 
+                              Fail = predicted_probs_boost[, "Fail"],
+                              Pass = predicted_probs_boost[, "Pass"])
+
+sorted_bagging <- bagging_results %>%
+  arrange(desc(Fail))
+
+pos_thresh <- 0.95
+cumulative_pos_cases <- cumsum(sorted_bagging$obs == "Fail")
+total_positive_cases <- sum(sorted_bagging$obs == "Fail")
+samples_needed <- which(cumulative_pos_cases >= total_positive_cases * pos_thresh)[1]
+print(paste("Number of samples needed to reach", pos_thresh * 100, "% of positive cases:", samples_needed))
+
+
+```
+
+``` {r BART}
+set.seed(20)
+################################################################
+# BART [Regression]
+################################################################
+xtrain <- GPA_train[, 1:12]
+ytrain <- GPA_train[, 13]
+xtest <- GPA_test[, 1:12]
+ytest <-GPA_test[, 13]
+
+bartfit <- gbart(xtrain, ytrain, x.test = xtest)
+yhat.bart <- bartfit$yhat.test.mean
+mean((ytest - yhat.bart)^2)
+
+plot(ytest,yhat.bart, main = "Test GPA vs Predicted GPA", xlab = "Test GPA", ylab = "Predicted GPA")
+abline(0,1,col=2)
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(leaps)
+library(caret)
+library(MASS)
+library(dplyr)
+gpa <- read_csv("gpa_df.csv",
+                col_types = cols(
+                  ...1 = col_skip(),
+                  StudentID = col_skip(),
+                  Gender = col_factor(levels = c("0", "1")),
+                  Ethnicity = col_factor(levels = c("0", "1", "2", "3")),
+                  ParentalEducation = col_factor(levels = c("0", "1", "2", "3", "4")),
+                  Tutoring = col_factor(levels = c("0", "1")),
+                  ParentalSupport = col_factor(levels = c("0", "1", "2", "3", "4")),
+                  Extracurricular = col_factor(levels = c("0", "1")),
+                  Sports = col_factor(levels = c("0", "1")),
+                  Music = col_factor(levels = c("0", "1")),
+                  Volunteering = col_factor(levels = c("0", "1")),
+                  GradeClass = col_skip(),
+                  pass_fail = col_factor(levels = c("0","1"))
+                ))
+#keeps just the variables used for base regressions (removing categoricals)
+gpa_reg <- gpa[, !(names(gpa) %in% c("newGradeClass", "pass_fail"))]
+
+#keeps just the pass_fail for binary classification
+gpa_bc <- gpa[, !(names(gpa) %in% c("GPA", "newGradeClass"))]
+
+#keeps just the newGradeClass for multi classification
+gpa_mc <- gpa[, !(names(gpa) %in% c("GPA", "pass_fail"))]
+
+```
+
+## Linear Regression
+Going to use the best subset approach for feature selection - it doesn't seem like there are any issues with doing so because we have relatively few columns and rows
+```{r}
+# code for generating plots from textbook
+n <- length(names(gpa_reg))
+
+best_subset_lr <- regsubsets(GPA ~ ., data = gpa_reg, nvmax = NULL)
+
+summary_subsets_lr <- summary(best_subset_lr)
+
+plot(summary_subsets_lr$rss, xlab = "Number of Variables",
+       ylab = "RSS", type = "l")
+
+
+max_ar2 <- which.max(summary_subsets_lr$adjr2)
+plot(summary_subsets_lr$adjr2, xlab = "Number of Variables",
+     ylab = "Adjusted RSq", type = "l")
+points(max_ar2, summary_subsets_lr$adjr2[max_ar2], col = "red", cex = 2,
+         pch = 20)
+
+plot(summary_subsets_lr$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+min_cp <- which.min(summary_subsets_lr$cp)
+points(min_cp, summary_subsets_lr$cp[min_cp], col = "red", cex = 2, pch = 20)
+
+min_bic <- which.min(summary_subsets_lr$bic)
+plot(summary_subsets_lr$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+points(min_bic, summary_subsets_lr$bic[min_bic], col = "red", cex = 2, pch = 20)
+```
+Looks like each metric plataues around 10 variables, but the suggested amount for Cp and Adjust R^2 is 14. Will test both in cross validation.
+
+## Cross Validation
+```{r}
+#code from textbook
+predict.regsubsets <- function(object, newdata , id, ...) {
+  form <- as.formula(object$call[[2]])
+  mat <- model.matrix(form, newdata)
+  coefi <- coef(object, id = id)
+  xvars <- names(coefi)
+  mat[, xvars] %*% coefi
+}
+set.seed(20)
+folds <- sample(rep(1:10, length = nrow(gpa_reg)))
+cv.errors <- matrix(NA, 10, 15, dimnames = list(NULL, paste(1:15)))
+
+for (j in 1:10){
+  best.fit <- regsubsets(GPA ~ ., data = gpa_reg[folds != j, ], nvmax = 15)
+  for (i in 1:15){
+    pred <- predict(best.fit, gpa_reg[folds ==j, ], id = i)
+    cv.errors[j, i] <- mean((gpa_reg$GPA[folds == j] - pred)^2)
+  }
+}
+mean.cv.errors <- apply(cv.errors, 2, mean)
+which.min(mean.cv.errors)
+plot(mean.cv.errors, type = "b")
+```
+Seems like my intuition was right. Doing cross validation revealed that the best model was with 10 variables.
+
+```{r}
+reg.best <- regsubsets(GPA ~ ., data = gpa_reg, nvmax = 15)
+coef(reg.best, 10)
+```
+
+```{r}
+set.seed(20)
+train_ix <- createDataPartition(gpa_reg$GPA, p = 0.8, list = FALSE)
+gpa_train <- gpa_reg[train_ix, ]
+gpa_test <- gpa_reg[-train_ix, ]
+
+lr_model <- lm(GPA ~ StudyTimeWeekly + Absences + Tutoring + ParentalSupport + Extracurricular + Sports + Music, data = gpa_train)
+lr_summary <- summary(lr_model)
+print(lr_summary)
+
+
+predictions <- predict(lr_model, newdata = gpa_test)
+
+rss_test <- sum((gpa_test$GPA - predictions)^2)
+mse_test <- rss_test / nrow(gpa_test)
+print(mse_test)
+print(sqrt(mse_test))
+```
+```{r}
+plot_data <- data.frame(
+  Actual = gpa_test$GPA,
+  Predicted = predictions
+)
+
+ggplot(plot_data, aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Test Set vs Predicted GPA",
+       x = "Test GPA",
+       y = "Predicted GPA") +
+  theme_minimal()
+```
+
+Now I'm testing the code with interactions I find interesting, to see if any of them may further explain the model.
+I am curious (given we don't know the exact methodology) if different ethnicities and genders perceive high/low levels of parental support differently. Also if the effect of absences is different depending on the age. Finally, a check to see if there is an interaction with age and study time - perhaps older students can study more efficiently.
+```{r}
+interactions <- as.formula(GPA ~ . + Age * Absences + Age * StudyTimeWeekly + ParentalSupport * Ethnicity + ParentalSupport * Gender)
+set.seed(20)
+folds <- sample(rep(1:10, length = nrow(gpa_reg)))
+cv.errors <- rep(NA, 10)
+models <- list()
+
+#cross-validation to find best model using stepwise
+for (j in 1:10) {
+  train_data <- gpa_reg[folds != j, ]
+  test_data <- gpa_reg[folds == j, ]
+  
+  step_model <- step(lm(interactions, data = train_data), direction = "both", trace = FALSE)
+  
+  models[[j]] <- step_model 
+  
+  pred <- predict(step_model, newdata = test_data)
+  cv.errors[j] <- mean((test_data$GPA - pred)^2)
+}
+
+print(mean(cv.errors))
+best_model <- models[[which.min(cv.errors)]]
+summary(best_model)
+```
+Adding the interactions seems to only produce a more complex model without a boost in the RMSE/MSE. Going forward going to continue with the original linear regression model that used best subset selection.
+# Logistic Regression
+```{r}
+glm.fits <- glm(pass_fail ~ ., family = binomial, data = gpa_bc)
+summary(glm.fits)
+```
+Looks like the p-values are pretty similar (in terms of statistical significance) as they were for linear regression, so lets focus on a model using the same predictors as before.
+```{r}
+glm.fits <- glm(pass_fail ~ StudyTimeWeekly + Absences + Tutoring + ParentalSupport + Extracurricular + Sports + Music, family = binomial, data = gpa_bc)
+summary(glm.fits)
+```
+### Cross validation
+```{r}
+gpa_bc$pass_fail <- factor(gpa_bc$pass_fail, levels = c("0", "1"), labels = c("Fail", "Pass"))
+train_ix = createDataPartition(gpa_bc$pass_fail, p = 0.8, list = FALSE)
+gpa_train = gpa_bc[train_ix, ]
+gpa_test  = gpa_bc[-train_ix, ]
+
+kcv = 10
+
+cv_folds = createFolds(gpa_train$pass_fail, k = kcv)
+
+my_summary = function(data, lev = NULL, model = NULL) {
+  default = defaultSummary(data, lev, model)
+  twoclass = twoClassSummary(data, lev, model)
+  twoclass[3] = 1 - twoclass[3]
+  names(twoclass) = c("AUC_ROC", "TPR", "FPR")
+  logloss = mnLogLoss(data, lev, model)
+  c(default, twoclass, logloss)
+}
+
+fit_control <- trainControl(
+  method = "cv",
+  indexOut = cv_folds,
+  classProbs = TRUE,
+  savePredictions = TRUE,
+  summaryFunction = my_summary,
+  selectionFunction = "oneSE"
+)
+logistic_model <- train(pass_fail ~ ., data = gpa_train, 
+                        method = "glm", family = binomial,
+                        trControl = fit_control, metric = "logLoss")
+
+print(logistic_model)
+```
+```{r}
+confusionMatrix(logistic_model)
+
+thresholder(logistic_model, 
+            threshold = 0.5, 
+            final = TRUE,
+            statistics = c("Sensitivity", "Specificity"))
+
+logistic_res = thresholder(logistic_model, 
+                           threshold = seq(0, 1, by = 0.01), 
+                           final = TRUE)
+logistic_res <- logistic_res %>% drop_na()
+
+logistic_res <- logistic_res %>%
+  mutate(TPR = Sensitivity, FPR = 1 - Specificity, FNR = 1 - Sensitivity)
+
+pldf <- logistic_res %>%
+  dplyr::select(prob_threshold, TPR, FPR, FNR, Sensitivity, Specificity, Precision, Recall) %>%
+  pivot_longer(-prob_threshold)
+ggplot(aes(x = prob_threshold, y = value, color = name), 
+       data = pldf %>% filter(name %in% c("TPR", "FPR"))) + 
+  geom_line()
+
+ggplot(aes(x = prob_threshold, y = value, color = name), 
+       data = pldf %>% filter(name %in% c("FNR", "FPR"))) + 
+  geom_line()
+
+```
+
+```{r}
+thres = 0.1
+tp = logistic_res %>% 
+  filter(prob_threshold == thres) %>% 
+  dplyr::select(prob_threshold, Sensitivity, Specificity) %>% #for some reason it broke without the dplyr::
+  mutate(TPR = Sensitivity, FPR = 1 - Specificity)
+
+ggplot(aes(x = prob_threshold, y = value, color = name), 
+       data = pldf %>% filter(name %in% c("TPR", "FPR"))) + 
+  geom_line() + 
+  geom_vline(xintercept = thres, lty = 2) + 
+  geom_point(aes(x = prob_threshold, y = TPR, color = NULL), data = tp) + 
+  geom_point(aes(x = prob_threshold, y = FPR, color = NULL), data = tp)
+
+# ROC curve
+optim_J = logistic_res[which.max(logistic_res$J), ]
+
+ggplot(aes(x = prob_threshold, y = J), 
+       data = logistic_res) + 
+  geom_line() + 
+  geom_vline(aes(xintercept = optim_J$prob_threshold), lty = 2)
+
+ggplot(aes(x = 1 - Specificity, y = Sensitivity), data = logistic_res) + 
+  geom_line() + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept = 0, slope = 1, linetype = 'dotted') +
+  geom_segment(aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkred', data = optim_J) + 
+  theme_bw()
+```
+```{r}
+ggplot(aes(x = prob_threshold, y = value, color = name), 
+       data = pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+  geom_line()
+
+ggplot(aes(x = Recall, y = Precision), data = logistic_res) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Precision") + 
+  xlab("Recall (TPR)") + 
+  geom_point(aes(x = Recall, y = Precision), color = 'darkred', data = optim_J) + 
+  theme_bw()
+```
+```{r}
+test_preds <- predict(logistic_model, gpa_test, type = "prob")
+test_results <- data.frame(obs = gpa_test$pass_fail, 
+                           Fail = test_preds[, "Fail"], 
+                           Pass = test_preds[, "Pass"])
+
+logistic_lift = caret::lift(obs ~ Fail, data = test_results)
+
+ggplot(logistic_lift) + 
+  geom_abline(slope = 1, linetype = 'dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+```
+
+```{r}
+best_preds = logistic_model$pred
+logistic_cal = caret::calibration(obs ~ Fail, data = best_preds, cuts = 7)
+ggplot(logistic_cal) + theme_bw()
+```
+```{r Number of Samples}
+sorted_test_results <- test_results %>%
+  arrange(desc(Fail))
+
+positive_class_threshold <- 0.95
+cumulative_positive_cases <- cumsum(sorted_test_results$obs == "Fail")
+total_positive_cases <- sum(sorted_test_results$obs == "Fail")
+samples_needed <- which(cumulative_positive_cases >= total_positive_cases * positive_class_threshold)[1]
+
+print(paste("Number of samples needed to reach", positive_class_threshold * 100, "% of positive cases:", samples_needed))
+
+optimal_threshold <- sorted_test_results$Fail[samples_needed]
+
+print(paste("Probability threshold to reach", positive_class_threshold * 100, "% of positive cases:", optimal_threshold))
+```
+
+```{r}
+
+test_probs = predict(logistic_model, newdata = gpa_test, type = "prob")
+
+get_metrics = function(threshold, test_probs, true_class, 
+                       pos_label, neg_label) {
+
+  pc = factor(ifelse(test_probs[, pos_label] > threshold, pos_label, neg_label), levels = c(pos_label, neg_label))
+  test_set = data.frame(obs = true_class, pred = pc, test_probs)
+  my_summary(test_set, lev = c(pos_label, neg_label))
+}
+
+metrics_optimal <- get_metrics(optimal_threshold, test_probs, gpa_test$pass_fail, "Pass", "Fail")
+print(metrics_optimal)
+```
+
+
+``` {r Bagging and Random Forest Regression}
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(ggplot2)
+library(pROC)
+
+studentPerformance <- read_csv("/Users/ramzikattan/Library/CloudStorage/OneDrive-TheUniversityofTexasatAustin/2. Summer/STA S380/StudentGPAProject/gpa_df.csv")
+
+performanceFrame <- studentPerformance %>% select(-...1, -newGradeClass, -pass_fail, -GradeClass, -StudentID)
+
+training <- createDataPartition(performanceFrame$GPA, p = 0.8, list = FALSE)
+GPAtrain <- performanceFrame[training, ]
+GPAtest <- performanceFrame[-training, ]
+
+set.seed(20)
+
+### RANDOM FOREST ###
+
+rf_grid <- expand.grid(.mtry = 2:7)
+
+fit_control <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = TRUE
+)
+
+performanceRF <- train(GPA ~ .,
+                       data = GPAtrain,
+                       method = "rf",
+                       trControl = fit_control,
+                       tuneGrid = rf_grid,
+                       ntree = 500)
+
+print(performanceRF)
+
+importance <- varImp(performanceRF, scale = FALSE)
+print(importance)
+
+ggplot(importance$importance, aes(x = reorder(row.names(importance$importance), desc(Overall)), y = Overall)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Feature") +
+  ylab("Importance") +
+  ggtitle("Feature Importance for GPA Prediction") +
+  theme_minimal()
+
+predictions <- predict(performanceRF, GPAtest)
+
+mse <- mean((GPAtest$GPA - predictions)^2)
+print(paste("Mean Squared Error:", mse))
+
+rmse <- sqrt(mse)
+print(paste("Root Mean Squared Error:", rmse))
+
+ggplot(data.frame(Actual = GPAtest$GPA, Predicted = predictions), aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue') +
+  geom_abline(slope = 1, intercept = 0, color = 'red') +
+  ggtitle("Actual vs Predicted GPA") +
+  xlab("Actual GPA") +
+  ylab("Predicted GPA") +
+  theme_minimal()
+
+plot(GPAtest$GPA, predictions, main = "Test GPA vs Predicted GPA", xlab = "Test GPA", ylab = "Predicted GPA")
+abline(0,1,col=2)
+
+
+### BAGGING ###
+
+bagging_model <- randomForest(GPA ~ ., data = GPAtrain, mtry = ncol(GPAtrain) - 1, ntree = 500, importance = TRUE)
+
+print(bagging_model)
+
+importance_bagging <- importance(bagging_model)
+print(importance_bagging)
+
+importance_df_bagging <- data.frame(Feature = rownames(importance_bagging), Importance = importance_bagging[, 1])
+
+ggplot(importance_df_bagging, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Feature") +
+  ylab("Importance") +
+  ggtitle("Feature Importance for GPA Prediction (Bagging)") +
+  theme_minimal()
+
+predictions_bagging <- predict(bagging_model, GPAtest)
+
+mseBagging <- mean((GPAtest$GPA - predictions_bagging)^2)
+print(paste("Mean Squared Error:", mseBagging))
+
+rmseBagging <- sqrt(mseBagging)
+print(paste("Root Mean Squared Error:", rmseBagging))
+
+ggplot(data.frame(Actual = GPAtest$GPA, Predicted = predictions_bagging), aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue') +
+  geom_abline(slope = 1, intercept = 0, color = 'red') +
+  ggtitle("Actual vs Predicted GPA (Bagging)") +
+  xlab("Actual GPA") +
+  ylab("Predicted GPA") +
+  theme_minimal()
+
+plot(GPAtest$GPA, predictions_bagging, main = "Test GPA vs Predicted GPA (Bagging)", xlab = "Test GPA", ylab = "Predicted GPA")
+abline(0,1,col=2)
+
+### CLASSIFICATION ###
+
+classificationFrame <- studentPerformance %>%
+  select(-...1, -newGradeClass, -GradeClass, -StudentID) %>%
+  mutate(
+    StudyTimeWeekly = scale(StudyTimeWeekly),
+    pass_fail = factor(pass_fail, levels = c("0", "1"), labels = c("Fail", "Pass"))
+  )
+
+training <- createDataPartition(classificationFrame$pass_fail, p = 0.8, list = FALSE)
+PFtrain <- classificationFrame[training, ]
+PFtest <- classificationFrame[-training, ]
+
+fit_control_class <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  savePredictions = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+rf_model_class <- randomForest(pass_fail ~ ., data = PFtrain, ntree = 500, importance = TRUE)
+
+rf_model_classt <- train(pass_fail ~ ., data = PFtrain, method = 'rf', trControl = fit_control_class, metric = "ROC")
+
+print(rf_model_classt)
+
+importance_class <- importance(rf_model_class)
+importance_df_class <- data.frame(Feature = rownames(importance_class), Importance = importance_class[, 1])
+print(importance_df_class)
+
+ggplot(importance_df_class, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Feature") +
+  ylab("Importance") +
+  ggtitle("Feature Importance for Pass/Fail Prediction (Classification)") +
+  theme_minimal()
+
+predictions_prob <- predict(rf_model_classt, newdata = PFtest, type = "prob")
+
+roc_obj <- roc(PFtest$pass_fail, predictions_prob[, 2])  # Assuming 'Pass' is the positive class
+
+ggplot() + 
+  geom_line(data = data.frame(tpr = roc_obj$sensitivities, fpr = 1 - roc_obj$specificities), aes(x = fpr, y = tpr)) + 
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") + 
+  ggtitle("Random Forest ROC Curve") + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1 - Specificity)") + 
+  theme_bw()
+
+print(paste("AUC:", auc(roc_obj)))
+
+predictions_class <- predict(rf_model_class, PFtest)
+
+conf_matrix <- confusionMatrix(predictions_class, PFtest$pass_fail)
+print(conf_matrix)
+
+PFtest$predicted_pass_fail <- predictions_class
+ggplot(PFtest, aes(x = pass_fail, fill = predicted_pass_fail)) +
+  geom_bar(position = "dodge") +
+  ggtitle("Actual vs Predicted Pass/Fail") +
+  xlab("Actual Pass/Fail") +
+  ylab("Count") +
+  theme_minimal()
+
+### Lift Curve Function ###
+plot_lift_curve <- function(actual, predicted, groups = 10) {
+  data <- data.frame(actual = actual, predicted = predicted)
+  data <- data[order(-data$predicted),]
+  data$group <- ntile(data$predicted, groups)
+  lift <- data %>%
+    group_by(group) %>%
+    summarise(actual_positive = sum(as.numeric(actual) - 1), n = n()) %>%
+    mutate(cum_actual_positive = cumsum(actual_positive),
+           lift = cum_actual_positive / (sum(actual_positive) / groups))
+  ggplot(lift, aes(x = group, y = lift)) +
+    geom_line() +
+    geom_point() +
+    ggtitle("Lift Curve") +
+    xlab("Decile Group") +
+    ylab("Lift") +
+    theme_minimal()
+}
+
+plot_lift_curve(PFtest$pass_fail, predictions_prob[, 2])
+
+### DECISION TREE REGRESSION ###
+
+tree_model_reg <- rpart(GPA ~ ., data = GPAtrain, method = "anova")
+
+print(tree_model_reg)
+
+rpart.plot(tree_model_reg)
+
+predictions_tree_reg <- predict(tree_model_reg, GPAtest)
+
+mse_tree_reg <- mean((GPAtest$GPA - predictions_tree_reg)^2)
+print(paste("Decision Tree Regression Mean Squared Error:", mse_tree_reg))
+
+# RMSE
+rmse_tree_reg <- sqrt(mse_tree_reg)
+print(rmse_tree_reg)
+
+### DECISION TREE CLASSIFICATION ###
+
+tree_model_class <- rpart(pass_fail ~ ., data = PFtrain, method = "class")
+
+print(tree_model_class)
+
+rpart.plot(tree_model_class)
+
+predictions_prob_tree_class <- predict(tree_model_class, newdata = PFtest, type = "prob")
+
+predictions_class_tree <- predict(tree_model_class, PFtest, type = "class")
+
+conf_matrix_tree <- confusionMatrix(predictions_class_tree, PFtest$pass_fail)
+print(conf_matrix_tree)
+```
+
+``` {r KNN}
+library(tidyverse)
+library(caret)
+library(kknn)
+library(ggplot2)
+library(GGally)
+library(pROC)
+library(dplyr)
+gpa <- read_csv("/Users/ramzikattan/Library/CloudStorage/OneDrive-TheUniversityofTexasatAustin/2. Summer/STA S380/StudentGPAProject/gpa_df.csv",
+                col_types = cols(
+                  ...1 = col_skip(),
+                  StudentID = col_skip(),
+                  Gender = col_factor(levels = c("0", "1")),
+                  Ethnicity = col_factor(levels = c("0", "1", "2", "3")),
+                  ParentalEducation = col_factor(levels = c("0", "1", "2", "3", "4")),
+                  Tutoring = col_factor(levels = c("0", "1")),
+                  ParentalSupport = col_factor(levels = c("0", "1", "2", "3", "4")),
+                  Extracurricular = col_factor(levels = c("0", "1")),
+                  Sports = col_factor(levels = c("0", "1")),
+                  Music = col_factor(levels = c("0", "1")),
+                  Volunteering = col_factor(levels = c("0", "1")),
+                  GradeClass = col_skip(),
+                  pass_fail = col_factor(levels = c("0","1"))
+                ))
+#keeps just the variables used for base regressions (removing categoricals)
+gpa_reg <- gpa[, !(names(gpa) %in% c("newGradeClass", "pass_fail"))]
+#keeps just the pass_fail for binary classification
+gpa_bc <- gpa[, !(names(gpa) %in% c("GPA", "newGradeClass"))]
+#keeps just the newGradeClass for multi classification
+gpa_mc <- gpa[, !(names(gpa) %in% c("GPA", "pass_fail"))]
+n <- dim(gpa)[1]
+plot(gpa$Absences,gpa$GPA)
+set.seed(20)
+trainIndex <- createDataPartition(gpa$GPA, p = 0.8, list = FALSE)
+trainData <- gpa[trainIndex, ]
+testData <- gpa[-trainIndex, ]
+knn_model <- train(GPA ~ ., data = trainData, method = "knn",
+                   trControl = trainControl(method = "cv", number = 10),
+                   tuneLength = 20)
+print(knn_model)
+plot(knn_model)
+predictions <- predict(knn_model, newdata = testData)
+rmse <- sqrt(mean((predictions - testData$GPA)^2))
+rmse
+results_df <- data.frame(Actual = testData$GPA, Predicted = predictions)
+head(results_df)
+results <- knn_model$results
+plot(results)
+summary(results)
+ggplot(results_df, aes(x = testData$GPA, y = predictions)) +
+  geom_point(color = "Black", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(title = "                           Predicted GPA vs Actual GPA",
+       x = "Test GPA",
+       y = "Predicted GPA") +
+  theme_minimal()
+### Classification Model For KNN ###
+set.seed(20)
+trainIndex <- createDataPartition(gpa$pass_fail, p = 0.8, list = FALSE)
+trainData <- gpa[trainIndex, ]
+testData <- gpa[-trainIndex, ]
+knn_model_classification <- train(pass_fail ~ ., data = trainData, method = "knn",
+                                  trControl = trainControl(method = "cv", number = 10),
+                                  tuneLength = 20)
+print(knn_model_classification)
+plot(knn_model_classification)
+predictions_classification <- predict(knn_model_classification, newdata = testData)
+prob_predictions <- predict(knn_model_classification, newdata = testData, type = "prob")
+confusionMatrix(predictions_classification, testData$pass_fail)
+#roc_curve <- roc(testData$pass_fail, as.numeric(predictions_classification))
+#plot(roc_curve)
+auc_value <- auc(roc_curve)
+print(paste("AUC:", auc_value))
+results_df <- data.frame(Actual = testData$pass_fail, Predicted = predictions_classification,
+                         Prob_Fail = prob_predictions[, "0"])
+head(results_df)
+lift_obj <- lift(Actual ~ Prob_Fail, data = results_df, class = "0")
+#xyplot(lift_obj, plot = "lift", auto.key = list(columns = 2))
+#xyplot(lift_obj, plot = "gain", auto.key = list(columns = 2))
+sorted_results_df <- results_df %>%
+  arrange(desc(Prob_Fail))
+positive_class_threshold <- 0.95
+cumulative_positive_cases <- cumsum(sorted_results_df$Actual == "0")
+total_positive_cases <- sum(sorted_results_df$Actual == "0")
+samples_needed <- which(cumulative_positive_cases >= total_positive_cases * positive_class_threshold)[1]
+print(paste("Number of samples needed to reach", positive_class_threshold * 100, "% of positive cases:", samples_needed))
+knn_model <- kknn(pass_fail ~ ., train = trainData, test = testData, k = 5)
+# Predict class labels
+class_predictions <- fitted(knn_model)
+# Predict probabilities for the positive class (assuming "1" is the positive class)
+prob_predictions <- knn_model$prob[, "1"]
+predicted_class <- factor(ifelse(prob_predictions > 0.5, "1", "0"), levels = c("0", "1"))
+true_class <- factor(testData$pass_fail, levels = c("0", "1"))
+# Create a confusion matrix to verify the predictions
+confusion_matrix <- confusionMatrix(predicted_class, true_class)
+print(confusion_matrix)
+# Calculate the ROC curve
+roc_curve <- roc(true_class, prob_predictions, levels = c("0", "1"), plot = TRUE, print.auc = TRUE)
+# Plot the ROC curve with customized x-axis label and no diagonal line
+plot(roc_curve, main = "ROC Curve", xlab = "1 - Specificity", ylab = "Sensitivity")
+# Calculate and print AUC
+auc_value <- auc(roc_curve)
+print(paste("AUC:", auc_value))
+```
+
+
+
+
+
+
