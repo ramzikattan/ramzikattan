@@ -1,0 +1,1 @@
+Project Description: While studying Introduction to Financial Analytics, I wanted to take the concepts beyond than stationary excel sheets and create interactive scripts that would query users on what problems they wanted to solve regarding certain umbrella topics. Here are the scripts I created to achieve this. 
